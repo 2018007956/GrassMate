@@ -4,9 +4,11 @@ import { useAuth } from '../../hooks/useAuth';
 import { fetchViewerProfile, type GithubViewerProfile } from '../../services/github/user';
 import { QUERY_CACHE_KEY } from '../../services/query/client';
 import { authStore } from '../../services/storage/authStore';
+import { openExternalUrl } from '../../services/platform/openExternalUrl';
 
 interface SettingsWindowProps {
   onClose: () => void;
+  standalone?: boolean;
 }
 
 type RefreshInterval = '12h' | '24h' | 'manual';
@@ -59,7 +61,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-export function SettingsWindow({ onClose }: SettingsWindowProps) {
+export function SettingsWindow({ onClose, standalone = false }: SettingsWindowProps) {
   const { token, user, refreshUser, logout } = useAuth();
 
   const [selectedSection, setSelectedSection] = useState('계정');
@@ -213,16 +215,18 @@ export function SettingsWindow({ onClose }: SettingsWindowProps) {
     return '✓ 연결됨';
   }, [profileError, profileLoading, token]);
 
-  return (
+  const panelHeightClass = standalone ? 'h-[calc(100vh-57px)]' : 'h-[calc(520px-57px)]';
+
+  const panel = (
     <div
-      className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"
-      onClick={onClose}
+      className={
+        standalone
+          ? 'h-full w-full overflow-hidden bg-white dark:bg-zinc-800'
+          : 'bg-white dark:bg-zinc-800 rounded-xl shadow-2xl overflow-hidden'
+      }
+      style={standalone ? undefined : { width: '680px', height: '520px' }}
+      onClick={standalone ? undefined : (event) => event.stopPropagation()}
     >
-      <div
-        className="bg-white dark:bg-zinc-800 rounded-xl shadow-2xl overflow-hidden"
-        style={{ width: '680px', height: '520px' }}
-        onClick={(event) => event.stopPropagation()}
-      >
         <div className="flex items-center justify-between px-4 py-3 border-b border-black/5 dark:border-white/5">
           <div>
             <span className="text-sm font-semibold text-zinc-900 dark:text-white">환경설정</span>
@@ -235,7 +239,7 @@ export function SettingsWindow({ onClose }: SettingsWindowProps) {
           </button>
         </div>
 
-        <div className="flex h-[calc(520px-57px)]">
+        <div className={`flex ${panelHeightClass}`}>
           <div className="w-48 border-r border-black/5 dark:border-white/5 bg-black/2 dark:bg-white/2 p-2">
             {sections.map(({ id, icon: Icon }) => (
               <button
@@ -398,22 +402,20 @@ export function SettingsWindow({ onClose }: SettingsWindowProps) {
                   <div>
                     <h3 className="text-base font-semibold text-zinc-900 dark:text-white mb-2">프로젝트 링크</h3>
                     <div className="flex flex-col gap-2">
-                      <a
-                        href="https://github.com/2018007956/GrassMate"
-                        target="_blank"
-                        rel="noreferrer"
+                      <button
+                        type="button"
+                        onClick={() => void openExternalUrl('https://github.com/2018007956/GrassMate')}
                         className="text-sm text-green-600 dark:text-green-400 hover:underline"
                       >
                         저장소: 2018007956/GrassMate
-                      </a>
-                      <a
-                        href="https://github.com/2018007956/GrassMate/issues"
-                        target="_blank"
-                        rel="noreferrer"
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void openExternalUrl('https://github.com/2018007956/GrassMate/issues')}
                         className="inline-flex w-fit items-center rounded-md bg-green-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-green-700 dark:bg-green-500 dark:hover:bg-green-400"
                       >
                         이슈 제보하기
-                      </a>
+                      </button>
                     </div>
                   </div>
 
@@ -425,7 +427,19 @@ export function SettingsWindow({ onClose }: SettingsWindowProps) {
             </div>
           </div>
         </div>
-      </div>
+    </div>
+  );
+
+  if (standalone) {
+    return <div className="h-screen w-screen overflow-hidden">{panel}</div>;
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"
+      onClick={onClose}
+    >
+      {panel}
     </div>
   );
 }

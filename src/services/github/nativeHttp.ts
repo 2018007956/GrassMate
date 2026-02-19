@@ -4,19 +4,28 @@ export interface NativeHttpResult {
   headers?: Record<string, string>;
 }
 
-async function tryTauriPostForm(url: string, body: URLSearchParams): Promise<NativeHttpResult | null> {
-  const tauriInvoke = (window as Window & { __TAURI__?: { core?: { invoke?: (cmd: string, args?: unknown) => Promise<NativeHttpResult> } } }).__TAURI__?.core?.invoke;
+const OAUTH_POST_HEADERS = {
+  Accept: 'application/json',
+  'Content-Type': 'application/x-www-form-urlencoded',
+} as const;
 
-  if (!tauriInvoke) return null;
+function toHeaderRecord(headers: Headers): Record<string, string> {
+  const record: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    record[key.toLowerCase()] = value;
+  });
+  return record;
+}
+
+async function tryTauriPostForm(url: string, body: URLSearchParams): Promise<NativeHttpResult | null> {
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
 
   try {
-    return await tauriInvoke('oauth_post_form', {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<NativeHttpResult>('oauth_post_form', {
       url,
       body: body.toString(),
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers: OAUTH_POST_HEADERS,
     });
   } catch {
     return null;
@@ -40,10 +49,7 @@ async function tryElectronPostForm(url: string, body: URLSearchParams): Promise<
     return await electronApi.oauthPostForm({
       url,
       body: body.toString(),
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers: OAUTH_POST_HEADERS,
     });
   } catch {
     return null;
@@ -53,15 +59,16 @@ async function tryElectronPostForm(url: string, body: URLSearchParams): Promise<
 async function browserPostForm(url: string, body: URLSearchParams): Promise<NativeHttpResult> {
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
+    headers: OAUTH_POST_HEADERS,
     body,
   });
 
   const text = await response.text();
-  return { status: response.status, body: text };
+  return {
+    status: response.status,
+    body: text,
+    headers: toHeaderRecord(response.headers),
+  };
 }
 
 export async function postForm(url: string, body: URLSearchParams): Promise<NativeHttpResult> {

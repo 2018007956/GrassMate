@@ -179,3 +179,9 @@
     line-height: 1.5;
   }
 }
+
+html.tauri-runtime,
+body.tauri-runtime,
+body.tauri-runtime #root {
+  background: transparent !important;
+}

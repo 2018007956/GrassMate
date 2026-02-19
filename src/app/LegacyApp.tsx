@@ -16,6 +16,7 @@ import { LoadingState } from './components/LoadingState';
 import { ErrorState } from './components/ErrorState';
 import { useAuth } from '../hooks/useAuth';
 import {
+  fetchLatestCommitGap,
   fetchMateMetrics,
   fetchMyKstDailyCommitCheck,
   fetchMyGrassMetrics,
@@ -25,6 +26,8 @@ import {
 import { fetchUserByUsername, type GithubLookupUser } from '../services/github/user';
 import { matesStore } from '../services/mates/store';
 import { ONE_HOUR_MS } from '../services/query/client';
+import { openExternalUrl } from '../services/platform/openExternalUrl';
+import { openSettingsWindow } from '../desktop/settingsWindow';
 import type { GithubRequestError, Mate, MateMetrics } from '../types/github';
 
 // Generate mock grass grid data (35 days)
@@ -33,6 +36,7 @@ const TIME_RANGE_OPTIONS = ['오늘', '7일', '30일'] as const;
 
 const EMPTY_GRASS_GRID = Array.from({ length: 35 }, () => 0);
 const DAY_MS = 24 * 60 * 60 * 1000;
+const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const LAST_SYNC_KEY = 'grassmate.last_sync';
 const REFRESH_INTERVAL_KEY = 'grassmate.settings.refreshInterval';
 const REFRESH_INTERVAL_EVENT = 'grassmate:refresh-interval-changed';
@@ -63,27 +67,66 @@ interface InAppNotification {
   message: string;
 }
 
-function getLocalDayKey(date: Date): string {
-  const year = date.getUTCFullYear();
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(date.getUTCDate()).padStart(2, '0');
+function getKstDayStartMs(nowMs: number = Date.now()): number {
+  return Math.floor((nowMs + KST_OFFSET_MS) / DAY_MS) * DAY_MS - KST_OFFSET_MS;
+}
+
+function getKstWeekStartMs(nowMs: number = Date.now()): number {
+  const startOfDayInKstMs = getKstDayStartMs(nowMs);
+  const weekDayOffset = (new Date(startOfDayInKstMs + KST_OFFSET_MS).getUTCDay() + 6) % 7; // Monday=0 ... Sunday=6
+  return startOfDayInKstMs - weekDayOffset * DAY_MS;
+}
+
+function getKstDayKey(nowMs: number = Date.now()): string {
+  const shifted = new Date(nowMs + KST_OFFSET_MS);
+  const year = shifted.getUTCFullYear();
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(shifted.getUTCDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 }
 
-function formatMonthDay(date: Date): string {
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(date.getUTCDate()).padStart(2, '0');
+function getKstDayGapFromIso(iso: string | null, nowMs: number = Date.now()): number | null {
+  if (!iso) return null;
+  const targetMs = new Date(iso).getTime();
+  if (Number.isNaN(targetMs)) return null;
+
+  const todayStartMs = getKstDayStartMs(nowMs);
+  const targetDayStartMs = getKstDayStartMs(targetMs);
+  return Math.max(Math.floor((todayStartMs - targetDayStartMs) / DAY_MS), 0);
+}
+
+function formatKstMonthDay(ms: number): string {
+  const shifted = new Date(ms + KST_OFFSET_MS);
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(shifted.getUTCDate()).padStart(2, '0');
   return `${month}/${day}`;
 }
 
-function getUtcStartOfDayMs(nowMs: number = Date.now()): number {
-  return Math.floor(nowMs / DAY_MS) * DAY_MS;
+function getDaysSinceWeekStart(nowMs: number = Date.now()): number {
+  const weekStartMs = getKstWeekStartMs(nowMs);
+  return Math.max((nowMs - weekStartMs) / DAY_MS, 0.01);
 }
 
-function getUtcWeekStartMs(nowMs: number = Date.now()): number {
-  const startOfDayInUtcMs = getUtcStartOfDayMs(nowMs);
-  const weekDayOffset = (new Date(startOfDayInUtcMs).getUTCDay() + 6) % 7; // Monday=0 ... Sunday=6
-  return startOfDayInUtcMs - weekDayOffset * DAY_MS;
+function getSelectedDaysForRange(range: string, nowMs: number = Date.now()): number {
+  if (range === '오늘') {
+    const startOfTodayMs = getKstDayStartMs(nowMs);
+    return Math.max((nowMs - startOfTodayMs) / DAY_MS, 0.01);
+  }
+
+  if (range === '30일') return 30;
+  return 7;
+}
+
+function getNextKstDayStartMs(nowMs: number = Date.now()): number {
+  const dayStartMs = getKstDayStartMs(nowMs);
+  return dayStartMs + DAY_MS;
+}
+
+function getNextKstSixPmMs(nowMs: number = Date.now()): number {
+  const dayStartMs = getKstDayStartMs(nowMs);
+  const sixPmMs = dayStartMs + 18 * 60 * 60 * 1000;
+  if (nowMs < sixPmMs) return sixPmMs;
+  return sixPmMs + DAY_MS;
 }
 
 function normalizeUsername(input: string): string {
@@ -119,23 +162,12 @@ function formatRelativeTime(iso: string): string {
   return `${Math.floor(elapsed / 3_600_000)}시간 전`;
 }
 
-function getDaysSinceWeekStart(): number {
-  const weekStartMs = getUtcWeekStartMs();
-  return Math.max((Date.now() - weekStartMs) / DAY_MS, 0.01);
-}
-
-function getSelectedDaysForRange(range: string): number {
-  if (range === '오늘') {
-    const startOfTodayMs = getUtcStartOfDayMs();
-    return Math.max((Date.now() - startOfTodayMs) / DAY_MS, 0.01);
-  }
-
-  if (range === '30일') return 30;
-  return 7;
-}
-
 function getMyGrassQueryKey(username: string, range: 'selected' | 'weekly' | 'streak', scope: string) {
   return ['my-grass', username, range, scope] as const;
+}
+
+function getMyLatestCommitGapQueryKey(username: string) {
+  return ['my-latest-commit-gap', username] as const;
 }
 
 function getMateMetricQueryKey(username: string, weekKey: string) {
@@ -266,24 +298,8 @@ function getDisplayNameForUsername(
   return profile?.name ?? profile?.login ?? matchedMate?.username ?? normalizedUsername;
 }
 
-function getKstDayKey(nowMs: number = Date.now()): string {
-  const shifted = new Date(nowMs + 9 * 60 * 60 * 1000);
-  const year = shifted.getUTCFullYear();
-  const month = String(shifted.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(shifted.getUTCDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-function getNextKstSixPmMs(nowMs: number = Date.now()): number {
-  const kstOffsetMs = 9 * 60 * 60 * 1000;
-  const dayStartMs = Math.floor((nowMs + kstOffsetMs) / DAY_MS) * DAY_MS - kstOffsetMs;
-  const sixPmMs = dayStartMs + 18 * 60 * 60 * 1000;
-  if (nowMs < sixPmMs) return sixPmMs;
-  return sixPmMs + DAY_MS;
-}
-
 function isAfterKstSixPm(nowMs: number = Date.now()): boolean {
-  const kstHour = new Date(nowMs + 9 * 60 * 60 * 1000).getUTCHours();
+  const kstHour = new Date(nowMs + KST_OFFSET_MS).getUTCHours();
   return kstHour >= 18;
 }
 
@@ -295,6 +311,7 @@ function getStreakKstCheckedDayKey(username: string): string {
 type ViewMode = 'Follow' | 'My' | 'Rank' | 'loading' | 'error-rate' | 'error-token';
 
 export function LegacyApp() {
+  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   const { user, token } = useAuth();
   const queryClient = useQueryClient();
   const [viewMode, setViewMode] = useState<ViewMode>('Follow');
@@ -325,15 +342,18 @@ export function LegacyApp() {
   const [myGrassDeletions, setMyGrassDeletions] = useState(0);
   const [myGrassGrid, setMyGrassGrid] = useState<number[]>(EMPTY_GRASS_GRID);
   const [myGrassStreakDays, setMyGrassStreakDays] = useState(0);
-  const [myNoActivityOverLookback, setMyNoActivityOverLookback] = useState(false);
+  const [myDaysSinceLastCommit, setMyDaysSinceLastCommit] = useState<number | null>(null);
   const [myGrassDailyStats, setMyGrassDailyStats] = useState<MyGrassDailyStat[]>([]);
   const [myWeeklyTopRepo, setMyWeeklyTopRepo] = useState<string>('-');
-  const [myWeeklyDayCommits, setMyWeeklyDayCommits] = useState(0);
-  const [myWeeklyNightCommits, setMyWeeklyNightCommits] = useState(0);
+  const [myWeeklyDayChangeScore, setMyWeeklyDayChangeScore] = useState(0);
+  const [myWeeklyNightChangeScore, setMyWeeklyNightChangeScore] = useState(0);
+  const [hasTodayKstCommit, setHasTodayKstCommit] = useState(false);
+  const [currentKstDayKey, setCurrentKstDayKey] = useState(() => getKstDayKey());
   const [inAppNotifications, setInAppNotifications] = useState<InAppNotification[]>([]);
   const notificationIdRef = useRef(1);
   const notificationTimerRef = useRef<number[]>([]);
   const rankAlertInitializedByKeyRef = useRef<Record<string, boolean>>({});
+  const previousKstDayKeyRef = useRef(currentKstDayKey);
   const normalizedSelfLogin = useMemo(
     () => (user?.login ? normalizeUsername(user.login) : null),
     [user?.login],
@@ -344,35 +364,29 @@ export function LegacyApp() {
     [mates],
   );
 
-  const currentWeekStart = useMemo(() => new Date(getUtcWeekStartMs()), []);
-  const currentWeekStartKey = useMemo(() => getLocalDayKey(currentWeekStart), [currentWeekStart]);
+  const currentWeekStartMs = useMemo(() => getKstWeekStartMs(), [currentKstDayKey]);
+  const currentWeekStartKey = useMemo(() => getKstDayKey(currentWeekStartMs), [currentWeekStartMs]);
   const currentWeekDays = useMemo(
-    () => Math.max((Date.now() - currentWeekStart.getTime()) / DAY_MS, 0.01),
-    [currentWeekStart],
+    () => Math.max((Date.now() - currentWeekStartMs) / DAY_MS, 0.01),
+    [currentKstDayKey, currentWeekStartMs],
   );
   const currentWeekRangeLabel = useMemo(() => {
-    const today = new Date();
-    return `${formatMonthDay(currentWeekStart)} ~ ${formatMonthDay(today)}`;
-  }, [currentWeekStart]);
+    const todayKstStartMs = getKstDayStartMs();
+    return `${formatKstMonthDay(currentWeekStartMs)} ~ ${formatKstMonthDay(todayKstStartMs)}`;
+  }, [currentKstDayKey, currentWeekStartMs]);
 
   const weeklySummary = useMemo(() => {
     const weekDays = myGrassDailyStats.filter((day) => day.date >= currentWeekStartKey);
     const workingDays = weekDays.filter((day) => day.commits > 0).length;
-    const commitPeriod =
-      myWeeklyDayCommits === 0 && myWeeklyNightCommits === 0
-        ? 'none'
-        : myWeeklyDayCommits === myWeeklyNightCommits
-          ? 'equal'
-          : myWeeklyNightCommits > myWeeklyDayCommits
-            ? 'night'
-            : 'day';
+    const commitPeriod: 'day' | 'night' =
+      myWeeklyNightChangeScore > myWeeklyDayChangeScore ? 'night' : 'day';
 
     return {
       workingDays,
       topRepoLabel: myWeeklyTopRepo,
       commitPeriod,
     };
-  }, [currentWeekStartKey, myGrassDailyStats, myWeeklyDayCommits, myWeeklyNightCommits, myWeeklyTopRepo]);
+  }, [currentWeekStartKey, myGrassDailyStats, myWeeklyDayChangeScore, myWeeklyNightChangeScore, myWeeklyTopRepo]);
 
   const isRankAlertEnabled = useCallback(
     () => loadBooleanSetting(RANK_ALERT_KEY, true),
@@ -442,6 +456,45 @@ export function LegacyApp() {
     };
   }, []);
 
+  useEffect(() => {
+    let timerId = 0;
+    let cancelled = false;
+
+    const syncCurrentKstDay = () => {
+      setCurrentKstDayKey(getKstDayKey());
+    };
+
+    const schedule = () => {
+      const delayMs = Math.max(getNextKstDayStartMs() - Date.now(), 1000);
+      timerId = window.setTimeout(() => {
+        if (cancelled) return;
+        syncCurrentKstDay();
+        schedule();
+      }, delayMs);
+    };
+
+    const onVisibilityOrFocus = () => {
+      syncCurrentKstDay();
+    };
+
+    schedule();
+    document.addEventListener('visibilitychange', onVisibilityOrFocus);
+    window.addEventListener('focus', onVisibilityOrFocus);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+      document.removeEventListener('visibilitychange', onVisibilityOrFocus);
+      window.removeEventListener('focus', onVisibilityOrFocus);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (previousKstDayKeyRef.current === currentKstDayKey) return;
+    previousKstDayKeyRef.current = currentKstDayKey;
+    setHasTodayKstCommit(false);
+  }, [currentKstDayKey]);
+
   const loadMyGrass = useCallback(
     async ({ force = false }: { force?: boolean } = {}) => {
       if (!token || !normalizedSelfLogin) return null;
@@ -457,7 +510,7 @@ export function LegacyApp() {
         const weeklyKey = getMyGrassQueryKey(normalizedSelfLogin, 'weekly', currentWeekStartKey);
         const streakKey = getMyGrassQueryKey(normalizedSelfLogin, 'streak', 'recent');
 
-        const [selectedMetric, weeklyMetric, streakMetric] = await Promise.all([
+        const [selectedMetric, weeklyMetric, streakMetric, kstDailyCheck] = await Promise.all([
           queryClient.fetchQuery({
             queryKey: selectedKey,
             queryFn: () => fetchMyGrassMetrics(token, normalizedSelfLogin, selectedDays),
@@ -476,6 +529,7 @@ export function LegacyApp() {
             staleTime: force ? 0 : ONE_HOUR_MS,
             gcTime: ONE_HOUR_MS,
           }),
+          fetchMyKstDailyCommitCheck(token, normalizedSelfLogin).catch(() => null),
         ]);
 
         setMyGrassAdditions(selectedMetric.additions);
@@ -483,15 +537,38 @@ export function LegacyApp() {
         setMyGrassGrid(streakMetric.grid);
         // Keep streak independent from today/7d/30d and weekly summary ranges.
         setMyGrassStreakDays(streakMetric.streakDays);
-        setMyNoActivityOverLookback(streakMetric.commitCount === 0);
+        let daysSinceLastCommit = getKstDayGapFromIso(streakMetric.latestCommitAt);
+        if (daysSinceLastCommit === null) {
+          const latestCommitGap = await queryClient.fetchQuery({
+            queryKey: getMyLatestCommitGapQueryKey(normalizedSelfLogin),
+            queryFn: () => fetchLatestCommitGap(token, normalizedSelfLogin),
+            staleTime: force ? 0 : ONE_HOUR_MS,
+            gcTime: ONE_HOUR_MS,
+          });
+          daysSinceLastCommit = latestCommitGap.daysSinceLatestCommit;
+        }
+        if (
+          kstDailyCheck &&
+          kstDailyCheck.todayKst === getKstDayKey() &&
+          kstDailyCheck.todayCommits === 0 &&
+          daysSinceLastCommit === 0
+        ) {
+          daysSinceLastCommit = 1;
+        }
+        setMyDaysSinceLastCommit(daysSinceLastCommit);
         setMyGrassDailyStats(weeklyMetric.dailyStats);
         setMyWeeklyTopRepo(
           weeklyMetric.topRepo
             ? (weeklyMetric.topRepo.name.split('/').pop() ?? weeklyMetric.topRepo.name)
             : '-',
         );
-        setMyWeeklyDayCommits(weeklyMetric.dayCommits);
-        setMyWeeklyNightCommits(weeklyMetric.nightCommits);
+        setMyWeeklyDayChangeScore(weeklyMetric.dayChangeScore);
+        setMyWeeklyNightChangeScore(weeklyMetric.nightChangeScore);
+        if (kstDailyCheck) {
+          setHasTodayKstCommit(
+            kstDailyCheck.todayKst === getKstDayKey() && kstDailyCheck.todayCommits > 0,
+          );
+        }
         syncedAt = selectedMetric.syncedAt;
         setMyGrassSyncedAt(selectedMetric.syncedAt);
         localStorage.setItem(LAST_SYNC_KEY, selectedMetric.syncedAt);
@@ -1225,6 +1302,45 @@ export function LegacyApp() {
     return syncedAt ? new Date(syncedAt).toLocaleString() : '-';
   }, [rankManualSyncedAtByRange, timeRange]);
 
+  const refreshTodayKstCommitStatus = useCallback(async () => {
+    if (!token || !normalizedSelfLogin) return;
+
+    try {
+      const result = await fetchMyKstDailyCommitCheck(token, normalizedSelfLogin);
+      const todayKst = getKstDayKey();
+
+      if (result.todayKst !== todayKst) {
+        setHasTodayKstCommit(false);
+        return;
+      }
+
+      setHasTodayKstCommit(result.todayCommits > 0);
+    } catch {
+      // Keep previous status and retry on the next check window.
+    }
+  }, [normalizedSelfLogin, token]);
+
+  useEffect(() => {
+    if (!token || !normalizedSelfLogin) {
+      setHasTodayKstCommit(false);
+      return;
+    }
+
+    void refreshTodayKstCommitStatus();
+  }, [currentKstDayKey, normalizedSelfLogin, refreshTodayKstCommitStatus, token]);
+
+  useEffect(() => {
+    if (!token || !normalizedSelfLogin || hasTodayKstCommit) return;
+
+    const timerId = window.setInterval(() => {
+      void refreshTodayKstCommitStatus();
+    }, 5 * 60 * 1000);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [hasTodayKstCommit, normalizedSelfLogin, refreshTodayKstCommitStatus, token]);
+
   const runStreakKstAlertCheck = useCallback(async () => {
     if (!token || !user?.login) return;
     if (!isStreakAlertEnabled()) return;
@@ -1236,6 +1352,7 @@ export function LegacyApp() {
     try {
       const result = await fetchMyKstDailyCommitCheck(token, user.login);
       localStorage.setItem(checkedKey, todayKst);
+      setHasTodayKstCommit(result.todayKst === todayKst && result.todayCommits > 0);
 
       if (result.yesterdayCommits <= 0) return;
       if (result.todayCommits > 0) return;
@@ -1431,10 +1548,23 @@ export function LegacyApp() {
       const profileUrl =
         mateProfiles[normalizedUsername]?.html_url ??
         `https://github.com/${encodeURIComponent(normalizedUsername)}`;
-      window.open(profileUrl, '_blank', 'noopener,noreferrer');
+      void openExternalUrl(profileUrl);
     },
     [mateProfiles],
   );
+
+  const handleOpenSettings = useCallback(() => {
+    if (!isTauri) {
+      setShowSettings(true);
+      return;
+    }
+
+    void openSettingsWindow().then((opened) => {
+      if (!opened) {
+        setShowSettings(true);
+      }
+    });
+  }, [isTauri]);
 
   useEffect(() => {
     const currentMateUsernames = new Set(mates.map((mate) => normalizeUsername(mate.username)));
@@ -1460,13 +1590,13 @@ export function LegacyApp() {
     }
 
     if (viewMode === 'error-token') {
-      return <ErrorState type="token-missing" onRetry={() => setShowSettings(true)} />;
+      return <ErrorState type="token-missing" onRetry={handleOpenSettings} />;
     }
 
     if (selectedTab === 'Follow') {
       return (
-        <div className="flex flex-col h-full">
-          <div className="p-4 space-y-3">
+        <div className="flex flex-col h-full min-h-0">
+          <div className="px-4 pb-4 pt-0 space-y-3">
             <input
               type="text"
               value={followSearchInput}
@@ -1495,35 +1625,37 @@ export function LegacyApp() {
             )}
           </div>
 
-          <div className="flex-1 overflow-y-auto flex flex-col">
+          <div className="flex-1 min-h-0 flex flex-col">
             <div className="px-4 py-2 text-xs text-zinc-500 dark:text-zinc-400 border-b border-black/5 dark:border-white/5 flex items-center justify-between">
               <span>집계 기간: {currentWeekRangeLabel} (월요일 ~ 오늘)</span>
               <span>{mates.length}명</span>
             </div>
-            {followRows.length === 0 ? (
-              <div className="flex-1">
-                <EmptyState />
-              </div>
-            ) : (
-              followRows.map((mate) => (
-                <MateRow
-                  key={mate.username}
-                  username={mate.username}
-                  displayName={mate.displayName}
-                  avatar={mate.avatar}
-                  additions={mate.additions}
-                  deletions={mate.deletions}
-                  change={mate.change}
-                  trend={mate.trend}
-                  sparklineData={mate.sparklineData}
-                  lastUpdated={mate.lastUpdated}
-                  isPinned={mate.isPinned}
-                  onDelete={() => handleDeleteMate(mate.username)}
-                  onTogglePin={() => handleTogglePinMate(mate.username)}
-                  onOpenProfile={() => handleOpenMateProfile(mate.username)}
-                />
-              ))
-            )}
+            <div className={`flex-1 min-h-0 ${followRows.length === 0 ? 'overflow-y-hidden' : 'overflow-y-auto'}`}>
+              {followRows.length === 0 ? (
+                <div className="h-full">
+                  <EmptyState topAligned className="h-full" />
+                </div>
+              ) : (
+                followRows.map((mate) => (
+                  <MateRow
+                    key={mate.username}
+                    username={mate.username}
+                    displayName={mate.displayName}
+                    avatar={mate.avatar}
+                    additions={mate.additions}
+                    deletions={mate.deletions}
+                    change={mate.change}
+                    trend={mate.trend}
+                    sparklineData={mate.sparklineData}
+                    lastUpdated={mate.lastUpdated}
+                    isPinned={mate.isPinned}
+                    onDelete={() => handleDeleteMate(mate.username)}
+                    onTogglePin={() => handleTogglePinMate(mate.username)}
+                    onOpenProfile={() => handleOpenMateProfile(mate.username)}
+                  />
+                ))
+              )}
+            </div>
           </div>
         </div>
       );
@@ -1532,32 +1664,42 @@ export function LegacyApp() {
     if (selectedTab === 'My') {
       return (
         <div className="flex flex-col h-full">
-          <div className="p-4 space-y-3 border-b border-black/5 dark:border-white/5">
+          <div className="px-4 pb-4 pt-1 space-y-3 border-b border-black/5 dark:border-white/5">
             <div className="flex items-center justify-between">
               <TimeRangePills selected={timeRange} onChange={setTimeRange} options={['오늘', '7일', '30일']} />
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          <div className="flex-1 overflow-y-hidden px-4 pb-4 pt-0 space-y-3">
             {/* My Grass Summary */}
             <div className="p-4 bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-900/20 dark:to-emerald-900/20 rounded-lg border border-green-200 dark:border-green-800">
-              <div className="flex items-start justify-between mb-3">
+              <div className="flex items-start justify-between mb-2">
                 <div>
                   <div className="text-xs text-green-700 dark:text-green-400 mb-1">
                     내 잔디 · {timeRange}
                   </div>
-                  <div className="text-2xl font-semibold text-zinc-900 dark:text-white mb-1">
-                    {myGrassLoading ? '동기화 중…' : `총 변경 ${(myGrassAdditions + myGrassDeletions).toLocaleString()}`}
-                  </div>
-                  <div className="flex items-center gap-3 text-xs">
-                    <span className="text-green-600 dark:text-green-400">+{myGrassAdditions.toLocaleString()}</span>
-                    <span className="text-red-600 dark:text-red-400">-{myGrassDeletions.toLocaleString()}</span>
+                  <div className="mb-1 flex items-end gap-2 text-xl font-semibold text-zinc-900 dark:text-white">
+                    <span>
+                      {myGrassLoading
+                        ? '동기화 중…'
+                        : (myGrassAdditions + myGrassDeletions).toLocaleString()}
+                    </span>
+                    {!myGrassLoading && (
+                      <span className="relative -top-1 flex items-center gap-2 text-xs font-medium">
+                        <span className="text-green-600 dark:text-green-400">
+                          +{myGrassAdditions.toLocaleString()}
+                        </span>
+                        <span className="text-red-600 dark:text-red-400">
+                          -{myGrassDeletions.toLocaleString()}
+                        </span>
+                      </span>
+                    )}
                   </div>
                 </div>
                 <GrassGrid data={myGrassGrid} size={6} />
               </div>
               
-              <div className="pt-3 border-t border-green-200 dark:border-green-800">
+              <div className="pt-2 border-t border-green-200 dark:border-green-800">
                 <div className="text-[10px] text-zinc-500 dark:text-zinc-400">
                   마지막 동기화: {myGrassSyncedAt ? new Date(myGrassSyncedAt).toLocaleString() : '-'}
                 </div>
@@ -1569,23 +1711,24 @@ export function LegacyApp() {
                 <div className="text-xs text-amber-600 dark:text-amber-400">
                   정보를 불러오지 못했어요
                 </div>
-              ) : myNoActivityOverLookback ? (
+              ) : myDaysSinceLastCommit !== null && myDaysSinceLastCommit > 1 ? (
                 <div className="text-xs text-amber-700 dark:text-amber-300">
-                  작업을 안한 지 {STREAK_LOOKBACK_DAYS}일이 넘었습니다
+                  최근 작업을 안 한 지 {myDaysSinceLastCommit}일입니다
+                </div>
+              ) : !hasTodayKstCommit ? (
+                <div className="text-xs text-amber-700 dark:text-amber-300">
+                  연속 {myGrassStreakDays + 1}일 달성 도전! 🌱
                 </div>
               ) : (
-                <div className="flex items-center justify-between text-xs">
+                <div className="text-xs">
                   <span className="text-amber-700 dark:text-amber-300">
-                    연속 기록 {myGrassStreakDays}일
-                  </span>
-                  <span className="text-amber-600 dark:text-amber-400">
-                    오늘 한 줄만 더! 🌱
+                    연속 기록 {myGrassStreakDays}일 ✨
                   </span>
                 </div>
               )}
             </div>
 
-            <div className="p-4 rounded-lg border border-black/10 dark:border-white/10 bg-white/70 dark:bg-zinc-900/40">
+            <div className="px-4 py-2 rounded-lg border border-black/10 dark:border-white/10 bg-white/70 dark:bg-zinc-900/40">
               <div className="mb-3 flex items-center justify-between">
                 <div className="text-xs text-zinc-600 dark:text-zinc-400">이번 주 요약</div>
                 <div className="text-[11px] text-zinc-500 dark:text-zinc-400">{currentWeekRangeLabel}</div>
@@ -1615,13 +1758,6 @@ export function LegacyApp() {
                     {weeklySummary.commitPeriod === 'night' && (
                       <Moon className="h-4 w-4 text-indigo-500" />
                     )}
-                    {weeklySummary.commitPeriod === 'equal' && (
-                      <>
-                        <Sun className="h-4 w-4 text-amber-500" />
-                        <Moon className="h-4 w-4 text-indigo-500" />
-                      </>
-                    )}
-                    {weeklySummary.commitPeriod === 'none' && <span>-</span>}
                   </div>
                 </div>
               </div>
@@ -1635,7 +1771,7 @@ export function LegacyApp() {
     if (selectedTab === 'Rank') {
       return (
         <div className="flex flex-col h-full">
-          <div className="p-4 space-y-3 border-b border-black/5 dark:border-white/5">
+          <div className="px-4 pb-4 pt-1 space-y-3 border-b border-black/5 dark:border-white/5">
             <TimeRangePills selected={timeRange} onChange={setTimeRange} options={['오늘', '7일', '30일']} />
           </div>
 
@@ -1678,40 +1814,42 @@ export function LegacyApp() {
 
   return (
     <div className={isDark ? 'dark' : ''}>
-      <div className="fixed top-4 left-4 z-50 flex gap-2">
-        <button
-          onClick={() => setIsDark(!isDark)}
-          className="px-3 py-2 text-xs font-medium bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white border border-black/10 dark:border-white/10 rounded-lg shadow-sm hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors flex items-center gap-2"
-        >
-          {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          {isDark ? 'Light' : 'Dark'}
-        </button>
+      {!isTauri && (
+        <div className="fixed top-4 left-4 z-50 flex gap-2">
+          <button
+            onClick={() => setIsDark(!isDark)}
+            className="px-3 py-2 text-xs font-medium bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white border border-black/10 dark:border-white/10 rounded-lg shadow-sm hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors flex items-center gap-2"
+          >
+            {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            {isDark ? 'Light' : 'Dark'}
+          </button>
 
-        <select
-          value={viewMode}
-          onChange={(e) => {
-            const newMode = e.target.value as ViewMode;
-            setViewMode(newMode);
-            if (['Follow', 'My', 'Rank'].includes(newMode)) {
-              setSelectedTab(newMode);
-            }
-          }}
-          className="px-3 py-2 text-xs font-medium bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white border border-black/10 dark:border-white/10 rounded-lg shadow-sm"
-        >
-          <option value="Follow">Follow 탭</option>
-          <option value="My">My 탭</option>
-          <option value="Rank">Rank 탭</option>
-          <option value="loading">Loading State</option>
-          <option value="error-rate">Error: Rate Limit</option>
-          <option value="error-token">Error: Token Missing</option>
-        </select>
-      </div>
+          <select
+            value={viewMode}
+            onChange={(e) => {
+              const newMode = e.target.value as ViewMode;
+              setViewMode(newMode);
+              if (['Follow', 'My', 'Rank'].includes(newMode)) {
+                setSelectedTab(newMode);
+              }
+            }}
+            className="px-3 py-2 text-xs font-medium bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white border border-black/10 dark:border-white/10 rounded-lg shadow-sm"
+          >
+            <option value="Follow">Follow 탭</option>
+            <option value="My">My 탭</option>
+            <option value="Rank">Rank 탭</option>
+            <option value="loading">Loading State</option>
+            <option value="error-rate">Error: Rate Limit</option>
+            <option value="error-token">Error: Token Missing</option>
+          </select>
+        </div>
+      )}
 
       <MacOSPopover>
         <div className="flex flex-col h-full">
           <PopoverHeader
             onRefresh={handleRefresh}
-            onSettings={() => setShowSettings(true)}
+            onSettings={handleOpenSettings}
             isRefreshing={isRefreshing}
             subtitle={user?.login ? `@${user.login}` : undefined}
           />
@@ -1726,7 +1864,7 @@ export function LegacyApp() {
             </div>
           )}
 
-          <div className="flex-1 overflow-hidden mt-3">
+          <div className="flex-1 min-h-0 overflow-hidden mt-3">
             {renderContent()}
           </div>
         </div>

@@ -11,7 +11,7 @@ import {
 import type { AuthState, DeviceFlowInfo, GithubUser, StoredAuth } from '../types/github';
 import { requestDeviceCode, pollAccessToken } from '../services/github/deviceFlow';
 import { fetchViewer } from '../services/github/user';
-import { authStore } from '../services/storage/authStore';
+import { AUTH_STORAGE_KEY, authStore } from '../services/storage/authStore';
 
 interface AuthContextValue {
   state: AuthState;
@@ -26,6 +26,11 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const AUTH_BROADCAST_CHANNEL = 'grassmate.auth.channel.v1';
+
+type AuthBroadcastMessage = {
+  type: 'logout';
+};
 
 function toStoredAuth(token: string, scope: string | undefined, user: GithubUser): StoredAuth {
   return {
@@ -45,6 +50,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [deviceFlowInfo, setDeviceFlowInfo] = useState<DeviceFlowInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const cancelledRef = useRef(false);
+  const authChannelRef = useRef<BroadcastChannel | null>(null);
 
   const resetSignedOut = useCallback(() => {
     setState('signedOut');
@@ -60,11 +66,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setState('signedOut');
   }, []);
 
+  const applyStoredAuth = useCallback(
+    (stored: StoredAuth | null) => {
+      if (!stored?.access_token) {
+        resetSignedOut();
+        return;
+      }
+
+      setToken(stored.access_token);
+      setUser({
+        id: stored.github_user_id,
+        login: stored.github_login,
+        avatar_url: stored.avatar_url,
+      });
+      setDeviceFlowInfo(null);
+      setError(null);
+      setState('signedIn');
+    },
+    [resetSignedOut],
+  );
+
+  const broadcastAuthMessage = useCallback((message: AuthBroadcastMessage) => {
+    authChannelRef.current?.postMessage(message);
+  }, []);
+
   const logout = useCallback(() => {
     cancelledRef.current = true;
     authStore.clear();
     resetSignedOut();
-  }, [resetSignedOut]);
+    broadcastAuthMessage({ type: 'logout' });
+  }, [broadcastAuthMessage, resetSignedOut]);
 
   const refreshUser = useCallback(async () => {
     if (!token) return;
@@ -160,19 +191,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [resetSignedOut]);
 
   useEffect(() => {
-    const stored = authStore.load();
-    if (!stored?.access_token) {
-      resetSignedOut();
-      return;
-    }
+    applyStoredAuth(authStore.load());
+  }, [applyStoredAuth]);
 
-    setToken(stored.access_token);
-    setUser({
-      id: stored.github_user_id,
-      login: stored.github_login,
-      avatar_url: stored.avatar_url,
-    });
-    setState('signedIn');
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== AUTH_STORAGE_KEY) return;
+      applyStoredAuth(authStore.load());
+    };
+
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [applyStoredAuth]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return;
+
+    const channel = new BroadcastChannel(AUTH_BROADCAST_CHANNEL);
+    authChannelRef.current = channel;
+
+    channel.onmessage = (event: MessageEvent<AuthBroadcastMessage>) => {
+      const message = event.data;
+      if (message?.type !== 'logout') return;
+
+      cancelledRef.current = true;
+      authStore.clear();
+      resetSignedOut();
+    };
+
+    return () => {
+      authChannelRef.current = null;
+      channel.close();
+    };
   }, [resetSignedOut]);
 
   const value = useMemo<AuthContextValue>(

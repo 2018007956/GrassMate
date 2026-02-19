@@ -180,13 +180,15 @@ export interface MyGrassMetrics {
   deletions: number;
   changeScore: number;
   net: number;
-  commitCount: number;
   grid: number[];
   streakDays: number;
+  latestCommitAt: string | null;
   dailyStats: MyGrassDailyStat[];
   topRepo: MyGrassTopRepo | null;
   dayCommits: number;
   nightCommits: number;
+  dayChangeScore: number;
+  nightChangeScore: number;
   syncedAt: string;
 }
 
@@ -212,6 +214,10 @@ export interface KstDailyCommitCheck {
   yesterdayKst: string;
   todayKst: string;
   checkedAt: string;
+}
+
+export interface LatestCommitGap {
+  daysSinceLatestCommit: number | null;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -387,9 +393,11 @@ export async function fetchMyGrassMetrics(
   const repoStats = new Map<string, { commits: number; additions: number; deletions: number; change: number }>();
   let dayCommits = 0;
   let nightCommits = 0;
+  let dayChangeScore = 0;
+  let nightChangeScore = 0;
   let additions = 0;
   let deletions = 0;
-  let commitCount = 0;
+  let latestCommitMs: number | null = null;
 
   await mapWithConcurrency(targetRepos, 3, async (repo) => {
     const commits = await githubRequest<CommitListItem[]>(
@@ -406,24 +414,29 @@ export async function fetchMyGrassMetrics(
 
         const commitAdditions = detail.stats?.additions ?? 0;
         const commitDeletions = detail.stats?.deletions ?? 0;
-        const commitDate = detail.commit?.author?.date
-          ? new Date(detail.commit.author.date)
-          : new Date();
-
         additions += commitAdditions;
         deletions += commitDeletions;
-        commitCount += 1;
+        const rawCommitDate = detail.commit?.author?.date ?? commit.commit?.author?.date;
+        if (!rawCommitDate) return;
+
+        const commitDate = new Date(rawCommitDate);
+        const commitDateMs = commitDate.getTime();
+        if (Number.isNaN(commitDateMs)) return;
+        latestCommitMs = latestCommitMs === null ? commitDateMs : Math.max(latestCommitMs, commitDateMs);
 
         const key = getDayKey(commitDate);
         dayCommitCounts.set(key, (dayCommitCounts.get(key) ?? 0) + 1);
         dayAdditions.set(key, (dayAdditions.get(key) ?? 0) + commitAdditions);
         dayDeletions.set(key, (dayDeletions.get(key) ?? 0) + commitDeletions);
 
-        const hour = commitDate.getHours();
-        if (hour >= 6 && hour < 18) {
+        const kstHour = new Date(commitDate.getTime() + KST_OFFSET_MS).getUTCHours();
+        const commitChangeScore = Math.abs(commitAdditions) + Math.abs(commitDeletions);
+        if (kstHour >= 6 && kstHour < 18) {
           dayCommits += 1;
+          dayChangeScore += commitChangeScore;
         } else {
           nightCommits += 1;
+          nightChangeScore += commitChangeScore;
         }
 
         const currentRepo = repoStats.get(repo.full_name) ?? {
@@ -458,9 +471,9 @@ export async function fetchMyGrassMetrics(
     deletions,
     changeScore: additions + deletions,
     net: additions - deletions,
-    commitCount,
     grid: buildGrassGrid(dayCommitCounts),
     streakDays: calculateStreak(dayCommitCounts),
+    latestCommitAt: latestCommitMs === null ? null : new Date(latestCommitMs).toISOString(),
     dailyStats: buildDailyStats(dayCommitCounts, dayAdditions, dayDeletions),
     topRepo: topRepoEntry
       ? {
@@ -473,7 +486,65 @@ export async function fetchMyGrassMetrics(
       : null,
     dayCommits,
     nightCommits,
+    dayChangeScore,
+    nightChangeScore,
     syncedAt: new Date().toISOString(),
+  };
+}
+
+export async function fetchLatestCommitGap(
+  token: string,
+  username: string,
+): Promise<LatestCommitGap> {
+  const repos = await githubRequest<RepoSummary[]>(
+    '/user/repos?visibility=public&affiliation=owner,collaborator,organization_member&sort=pushed&per_page=100',
+    { token },
+  );
+
+  const targetRepos = repos.filter((repo) => {
+    if (repo.private) return false;
+    return Boolean(repo.pushed_at);
+  });
+
+  let latestCommitMs: number | null = null;
+
+  await mapWithConcurrency(targetRepos, 3, async (repo) => {
+    try {
+      const commits = await githubRequest<CommitListItem[]>(
+        `/repos/${repo.full_name}/commits?author=${encodeURIComponent(username)}&per_page=1`,
+        { token },
+      );
+
+      const rawDate = commits[0]?.commit?.author?.date;
+      if (!rawDate) return;
+
+      const commitMs = new Date(rawDate).getTime();
+      if (Number.isNaN(commitMs)) return;
+      latestCommitMs = latestCommitMs === null ? commitMs : Math.max(latestCommitMs, commitMs);
+    } catch (error) {
+      const githubError = asGithubError(error);
+      if (githubError.status === 403 || githubError.status === 404 || githubError.status === 409 || githubError.status === 422) {
+        return;
+      }
+      throw error;
+    }
+  });
+
+  if (latestCommitMs === null) {
+    return {
+      daysSinceLatestCommit: null,
+    };
+  }
+
+  const todayStartMsKst = getKstDayStartMs();
+  const latestDayStartMsKst = getKstDayStartMs(latestCommitMs);
+  const daysSinceLatestCommit = Math.max(
+    Math.floor((todayStartMsKst - latestDayStartMsKst) / DAY_MS),
+    0,
+  );
+
+  return {
+    daysSinceLatestCommit,
   };
 }
 

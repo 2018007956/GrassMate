@@ -5,6 +5,7 @@ interface GrassGridProps {
 
 export function GrassGrid({ data, size = 8 }: GrassGridProps) {
   const max = Math.max(...data, 1);
+  const rows = 5;
   
   const getColor = (value: number) => {
     const intensity = value / max;
@@ -20,7 +21,7 @@ export function GrassGrid({ data, size = 8 }: GrassGridProps) {
       className="inline-grid gap-0.5"
       style={{
         gridAutoFlow: 'column',
-        gridTemplateRows: `repeat(7, ${size}px)`,
+        gridTemplateRows: `repeat(${rows}, ${size}px)`,
         gridAutoColumns: `${size}px`,
       }}
     >
