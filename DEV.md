@@ -10,3 +10,16 @@
   open ./src-tauri/target/release/bundle/macos/GrassMate.app
   ```
 - 빌드 결과: `src-tauri/target/release/bundle/dmg/*.dmg`
+
+## ⬇️ Download Website
+- 소스 경로: `website/`
+- 로컬 개발: `npm run site:dev`
+- 프로덕션 빌드: `npm run site:build`
+- 미리보기: `npm run site:preview`
+
+Vercel 설정 권장값:
+1. Project Import: 현재 레포 선택
+2. Framework Preset: `Vite`
+3. Build Command: `npm run site:build`
+4. Output Directory: `website/dist`
+5. Install Command: `npm install`

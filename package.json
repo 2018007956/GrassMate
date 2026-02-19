@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "site:dev": "vite --config website/vite.config.ts",
+    "site:build": "vite build --config website/vite.config.ts",
+    "site:preview": "vite preview --config website/vite.config.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

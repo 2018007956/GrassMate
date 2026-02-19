@@ -1,5 +1,6 @@
 package-lock.json
 node_modules/
 dist/
+website/dist/
 .env
 .DS_Store
