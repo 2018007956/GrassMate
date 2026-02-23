@@ -20,13 +20,36 @@
 - 동작:
   1. macOS 러너에서 Node/Rust 환경 구성
   2. `npm ci` 실행
-  3. `npm run tauri:build` 실행
-  4. `src-tauri/target/release/bundle/dmg/*.dmg`를 `GrassMate-dmg` 아티팩트로 업로드
-  5. `v*` 태그 푸시인 경우 GitHub Release를 생성하고 DMG를 자동 첨부
+  3. (`v*` 태그일 때) Developer ID 인증서 import + 코드 서명 설정
+  4. (`v*` 태그일 때) Apple notarization 정보 설정
+  5. `npm run tauri:build` 실행 (서명/공증 포함)
+  6. (`v*` 태그일 때) 서명/공증 검증 (`codesign`, `spctl`, `stapler validate`)
+  7. `src-tauri/target/release/bundle/dmg/*.dmg`를 `GrassMate-dmg` 아티팩트로 업로드
+  8. (`v*` 태그일 때) GitHub Release 생성 + DMG 자동 첨부
 
 #### 태그 푸시 자동 릴리즈
 - `v*` 태그를 push하면 워크플로우가 자동으로 GitHub Release를 생성합니다.
 - 같은 실행에서 생성된 DMG 파일이 Release assets에 자동 첨부됩니다.
+
+#### GitHub Secrets 사전 설정 (필수)
+- 공통 서명용
+  - `APPLE_CERTIFICATE`: Developer ID Application 인증서(`.p12`)를 base64 인코딩한 문자열
+  - `APPLE_CERTIFICATE_PASSWORD`: `.p12` export 비밀번호
+  - `KEYCHAIN_PASSWORD`: CI에서 임시 keychain 생성용 비밀번호
+- 공증용: 아래 두 방식 중 하나 선택
+  - 방식 A (권장, App Store Connect API)
+    - `APPLE_API_ISSUER`
+    - `APPLE_API_KEY` (Key ID)
+    - `APPLE_API_PRIVATE_KEY` (`.p8` 파일 내용)
+  - 방식 B (Apple ID)
+    - `APPLE_ID`
+    - `APPLE_PASSWORD` (앱 전용 비밀번호)
+    - `APPLE_TEAM_ID`
+
+인증서 base64 인코딩 예시(macOS):
+```bash
+base64 -i DeveloperID_Application.p12 | pbcopy
+```
 
 #### 실제 사용 순서
 1. 워크플로우 파일 포함해서 `main`에 push
